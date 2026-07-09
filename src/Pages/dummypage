@@ -1,0 +1,83 @@
+  action(Approve)
+            {
+                Caption = 'Approve';
+                Image = Approve;
+                ApplicationArea = All;
+                Promoted = true;
+                PromotedCategory = Process;
+
+                trigger OnAction()
+                begin
+                    if Rec.Status <> Rec.Status::Pending then
+                        Error('Only pending applications can be approved.');
+
+                    Rec.Status := Rec.Status::Approved;
+                    Rec.Modify(true);
+
+                    Message('Application %1 has been approved.', Rec."Application no");
+                end;
+            }
+
+
+area(Navigation)
+        {
+            group(Application)
+            {
+                Caption = 'Application';
+                Image = Document;
+
+
+
+                action(ApplicationCard)
+                {
+                    Caption = 'Application Card';
+                    Image = Card;
+                    Promoted = true;
+                    PromotedCategory =  
+                    RunObject = page "Permit Application Card";
+                }
+
+                action(ApplicationList)
+                {
+                    Caption = 'Application List';
+                    Image = List;
+                    Promoted = true;
+                    PromotedCategory = Process;
+                    RunObject = page "Permit Application List";
+                }
+            }
+
+            group("Business Information")
+            {
+                Caption = 'Business Information';
+                Image = Company;
+
+                action(BusinessInfoCard)
+                {
+                    Caption = 'Business Information Card';
+                    Image = Card;
+                    Promoted = true;
+                    PromotedCategory = Process;
+                    RunObject = page "Business Info Card";
+                }
+
+                action(BusinessInfoList)
+                {
+                    Caption = 'Business Information List';
+                    Image = List;
+                    Promoted = true;
+                    PromotedCategory = Process;
+                    RunObject = page "Business Info List";
+                }
+            }
+        }
+    }
+
+    trigger OnNewRecord(BelowxRec: Boolean)
+    var
+        PermitMgt: Codeunit "Business Permit Management";
+    begin
+
+    end;
+
+}
