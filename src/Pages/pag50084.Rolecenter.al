@@ -1,4 +1,5 @@
-page 50084 "Business Permit Role Center"
+
+/*page 50084 "Business Permit Role Center"
 {
     PageType = RoleCenter;
     ApplicationArea = All;
@@ -77,4 +78,4 @@ page 50084 "Business Permit Role Center"
             }
         }
     }
-}
+}*/

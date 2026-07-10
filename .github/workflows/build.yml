@@ -1,21 +1,160 @@
-name: CI
+name: Business Permit Pipeline
+
+# ---------------------------------------------------------------------------
+# CI/CD pipeline for an AL (Business Central) project.
+# Build & test run in a fresh BC sandbox Docker container on a Windows runner.
+# On push to main, the compiled app is deployed to a real BC environment
+# using an Azure AD app registration (S2S authentication).
+# ---------------------------------------------------------------------------
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # Path to the folder containing app.json for your AL project
+  AL_PROJECT_FOLDER: '.'
+  CONTAINER_NAME: 'bccicd'
+  CONTAINER_USER: 'admin'
+  CONTAINER_PASSWORD: 'P@ssw0rdCICD123!'   # only used inside the ephemeral build container
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-and-test:
+    runs-on: windows-latest
+    outputs:
+      app_version: ${{ steps.appjson.outputs.app_version }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install BcContainerHelper
+        shell: powershell
+        run: |
+          Install-Module BcContainerHelper -Force -AllowClobber -Scope CurrentUser
+          Import-Module BcContainerHelper
+
+      - name: Read app.json
+        id: appjson
+        shell: powershell
+        run: |
+          $appJsonPath = Join-Path $env:AL_PROJECT_FOLDER "app.json"
+          $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+          "app_name=$($appJson.name)" >> $env:GITHUB_OUTPUT
+          "app_version=$($appJson.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Create BC sandbox container
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          New-BcContainer `
+            -accept_eula `
+            -containerName $env:CONTAINER_NAME `
+            -artifactUrl (Get-BcArtifactUrl -type Sandbox -country us -select Latest) `
+            -auth UserPassword `
+            -Credential $credential `
+            -updateHosts `
+            -includeTestToolkit
+
+      - name: Compile app
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          Compile-AppInBcContainer `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -appProjectFolder (Resolve-Path $env:AL_PROJECT_FOLDER) `
+            -appOutputFolder (Join-Path $env:AL_PROJECT_FOLDER "output") `
+            -EnableCodeCop `
+            -EnableAppSourceCop:$false
+
+      - name: Publish app to container
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $appFile = Get-ChildItem -Path (Join-Path $env:AL_PROJECT_FOLDER "output") -Filter *.app | Select-Object -First 1
+          Publish-BcContainerApp `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -appFile $appFile.FullName `
+            -skipVerification `
+            -install `
+            -sync
+
+      - name: Run automated tests
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $results = Run-TestsInBcContainer `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -detailed `
+            -AzureDevOps 'error' `
+            -returnTrueIfAllPassed
+
+          if (-not $results) {
+            throw "One or more tests failed. Failing the pipeline."
+          }
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
         with:
-          dotnet-version: '8.0.x'
-      - name: Restore dependencies
-        run: dotnet restore
-      - name: Build
-        run: dotnet build --no-restore --configuration Release
+          name: business-permit-app
+          path: ${{ env.AL_PROJECT_FOLDER }}/output/*.app
+          if-no-files-found: error
+
+      - name: Remove build container
+        if: always()
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          Remove-BcContainer -containerName $env:CONTAINER_NAME -ErrorAction SilentlyContinue
+
+  deploy:
+    needs: build-and-test
+    runs-on: windows-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: production   # optional: set up manual approval via GitHub Environments
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: business-permit-app
+          path: ./output
+
+      - name: Install BcContainerHelper
+        shell: powershell
+        run: |
+          Install-Module BcContainerHelper -Force -AllowClobber -Scope CurrentUser
+          Import-Module BcContainerHelper
+
+      - name: Deploy to Business Central environment
+        shell: powershell
+        env:
+          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
+          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
+          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
+          BC_ENVIRONMENT_NAME: ${{ secrets.BC_ENVIRONMENT_NAME }}
+        run: |
+          Import-Module BcContainerHelper
+          $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
+
+          $authContext = New-BcAuthContext `
+            -tenantID $env:BC_TENANT_ID `
+            -clientID $env:BC_CLIENT_ID `
+            -clientSecret $env:BC_CLIENT_SECRET `
+            -scopes "https://api.businesscentral.dynamics.com/.default"
+
+          Publish-PerTenantExtensionApps `
+            -bcAuthContext $authContext `
+            -environment $env:BC_ENVIRONMENT_NAME `
+            -appFiles $appFile.FullName
