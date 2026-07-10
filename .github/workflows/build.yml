@@ -63,6 +63,7 @@ jobs:
         run: |
           Import-Module BcContainerHelper
           $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $volumeMount = "--volume `"$($env:BUILD_FOLDER):$($env:BUILD_FOLDER)`""
           New-BcContainer `
             -accept_eula `
             -containerName $env:CONTAINER_NAME `
@@ -70,7 +71,8 @@ jobs:
             -auth UserPassword `
             -Credential $credential `
             -updateHosts `
-            -includeTestToolkit
+            -includeTestToolkit `
+            -additionalParameters @($volumeMount)
 
       - name: Compile app
         shell: powershell
