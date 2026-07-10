@@ -1,4 +1,4 @@
-name: Business Permit Pipeline
+name: BC CI/CD Pipeline
 
 # ---------------------------------------------------------------------------
 # CI/CD pipeline for an AL (Business Central) project.
@@ -15,8 +15,11 @@ on:
   workflow_dispatch:
 
 env:
-  # Path to the folder containing app.json for your AL project
+  # Path to the folder containing app.json for your AL project, relative to the repo root
   AL_PROJECT_FOLDER: '.'
+  # GitHub-hosted Windows runners check out the repo to the D: drive, but Windows
+  # containers can only bind-mount folders on C:. We copy the project there before building.
+  BUILD_FOLDER: 'C:\bcbuild'
   CONTAINER_NAME: 'bccicd'
   CONTAINER_USER: 'admin'
   CONTAINER_PASSWORD: 'P@ssw0rdCICD123!'   # only used inside the ephemeral build container
@@ -36,11 +39,21 @@ jobs:
           Install-Module BcContainerHelper -Force -AllowClobber -Scope CurrentUser
           Import-Module BcContainerHelper
 
+      - name: 'Copy project to C: drive'
+        shell: powershell
+        run: |
+          # Windows containers can only bind-mount folders on C:, but GitHub's
+          # windows-latest runner checks out to D:. Copy the project over first.
+          New-Item -ItemType Directory -Path $env:BUILD_FOLDER -Force | Out-Null
+          Copy-Item -Path (Join-Path $env:AL_PROJECT_FOLDER "*") -Destination $env:BUILD_FOLDER -Recurse -Force
+          Write-Host "Project copied to $env:BUILD_FOLDER"
+          Get-ChildItem $env:BUILD_FOLDER
+
       - name: Read app.json
         id: appjson
         shell: powershell
         run: |
-          $appJsonPath = Join-Path $env:AL_PROJECT_FOLDER "app.json"
+          $appJsonPath = Join-Path $env:BUILD_FOLDER "app.json"
           $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
           "app_name=$($appJson.name)" >> $env:GITHUB_OUTPUT
           "app_version=$($appJson.version)" >> $env:GITHUB_OUTPUT
@@ -67,8 +80,8 @@ jobs:
           Compile-AppInBcContainer `
             -containerName $env:CONTAINER_NAME `
             -credential $credential `
-            -appProjectFolder (Resolve-Path $env:AL_PROJECT_FOLDER) `
-            -appOutputFolder (Join-Path $env:AL_PROJECT_FOLDER "output") `
+            -appProjectFolder $env:BUILD_FOLDER `
+            -appOutputFolder (Join-Path $env:BUILD_FOLDER "output") `
             -EnableCodeCop `
             -EnableAppSourceCop:$false
 
@@ -77,7 +90,7 @@ jobs:
         run: |
           Import-Module BcContainerHelper
           $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
-          $appFile = Get-ChildItem -Path (Join-Path $env:AL_PROJECT_FOLDER "output") -Filter *.app | Select-Object -First 1
+          $appFile = Get-ChildItem -Path (Join-Path $env:BUILD_FOLDER "output") -Filter *.app | Select-Object -First 1
           Publish-BcContainerApp `
             -containerName $env:CONTAINER_NAME `
             -credential $credential `
@@ -106,7 +119,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: business-permit-app
-          path: ${{ env.AL_PROJECT_FOLDER }}/output/*.app
+          path: ${{ env.BUILD_FOLDER }}\output\*.app
           if-no-files-found: error
 
       - name: Remove build container
