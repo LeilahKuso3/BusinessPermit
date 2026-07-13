@@ -150,6 +150,7 @@ jobs:
         shell: powershell
         env:
           BC_SERVER_INSTANCE: 'BC270'
+          BC_TENANT: 'default'
         run: |
           Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
 
@@ -159,43 +160,65 @@ jobs:
           $appInfo = Get-NAVAppInfo -Path $appFile.FullName
           Write-Host "App: $($appInfo.Name)  Version: $($appInfo.Version)  Publisher: $($appInfo.Publisher)"
 
-          # Check if this app (any version) is already installed, to decide install vs upgrade
-          $existing = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher -ErrorAction SilentlyContinue |
-                      Where-Object { $_.IsInstalled -eq $true }
+          $ErrorActionPreference = "Stop"
 
-          # Check if this exact version is already published (but maybe not installed) - e.g. from a retried/partial run
-          $alreadyPublished = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher -Version $appInfo.Version -ErrorAction SilentlyContinue
-
-          if ($alreadyPublished) {
-            Write-Host "Version $($appInfo.Version) is already published on $env:BC_SERVER_INSTANCE - skipping Publish-NAVApp"
-          } else {
-            Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification
+          # Publish (safe to attempt - if this exact version is already published, catch and continue)
+          try {
+            Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification -ErrorAction Stop
+            Write-Host "Published successfully."
+          } catch {
+            if ($_.Exception.Message -match "same App ID and Version") {
+              Write-Host "Already published at this version - continuing."
+            } else {
+              throw
+            }
           }
 
-          Sync-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
-
-          if ($existing) {
-            Write-Host "Existing installed version found ($($existing.VersionString)) - running data upgrade"
-            Start-NAVAppDataUpgrade -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
-          } else {
-            Write-Host "No existing installed version found - performing fresh install"
-            Install-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
+          # Sync (safe to attempt - if already synchronized, catch and continue)
+          try {
+            Sync-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+            Write-Host "Synced successfully."
+          } catch {
+            if ($_.Exception.Message -match "already synchronized") {
+              Write-Host "Already synchronized - continuing."
+            } else {
+              throw
+            }
           }
+
+          # Install (try fresh install first; if BC says a different version is already installed, upgrade instead)
+          try {
+            Install-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+            Write-Host "Installed successfully (fresh install)."
+          } catch {
+            if ($_.Exception.Message -match "already uses a different version") {
+              Write-Host "A different version is already installed - running data upgrade instead."
+              Start-NAVAppDataUpgrade -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+              Write-Host "Upgraded successfully."
+            } elseif ($_.Exception.Message -match "already installed") {
+              Write-Host "This exact version is already installed - nothing to do."
+            } else {
+              throw
+            }
+          }
+
+          Write-Host "Deploy step completed."
 
       - name: Verify installation
         shell: powershell
         env:
           BC_SERVER_INSTANCE: 'BC270'
+          BC_TENANT: 'default'
         run: |
           Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
           $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
           $appInfo = Get-NAVAppInfo -Path $appFile.FullName
 
-          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher |
+          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Publisher $appInfo.Publisher |
                        Where-Object { $_.IsInstalled -eq $true }
 
           if (-not $installed) {
-            throw "Verification failed: app is not showing as installed on $env:BC_SERVER_INSTANCE"
+            throw "Verification failed: app is not showing as installed on $env:BC_SERVER_INSTANCE (tenant $env:BC_TENANT)"
           }
 
-          Write-Host "Verified: $($installed.Name) v$($installed.VersionString) is installed and active."
+          Write-Host "Verified: $($installed.Name) v$($installed.VersionString) is installed and active for tenant $env:BC_TENANT."
