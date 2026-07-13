@@ -3,8 +3,8 @@ name: BC CI/CD Pipeline
 # ---------------------------------------------------------------------------
 # CI/CD pipeline for an AL (Business Central) project.
 # Build & test run in a fresh BC sandbox Docker container on a Windows runner.
-# On push to main, the compiled app is deployed to a real BC environment
-# using an Azure AD app registration (S2S authentication).
+# On push to main, the compiled app is deployed to an on-prem BC270 server
+# using the self-hosted runner (label: bc-onprem) via NAV Server Admin cmdlets.
 # ---------------------------------------------------------------------------
 
 on:
@@ -133,7 +133,7 @@ jobs:
 
   deploy:
     needs: build-and-test
-    runs-on: windows-latest
+    runs-on: [self-hosted, bc-onprem]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment: production   # optional: set up manual approval via GitHub Environments
     steps:
@@ -146,30 +146,49 @@ jobs:
           name: business-permit-app
           path: ./output
 
-      - name: Install BcContainerHelper
-        shell: powershell
-        run: |
-          Install-Module BcContainerHelper -Force -AllowClobber -Scope CurrentUser
-          Import-Module BcContainerHelper
-
-      - name: Deploy to Business Central environment
+      - name: Deploy to on-prem Business Central
         shell: powershell
         env:
-          BC_TENANT_ID: ${{ secrets.BC_TENANT_ID }}
-          BC_CLIENT_ID: ${{ secrets.BC_CLIENT_ID }}
-          BC_CLIENT_SECRET: ${{ secrets.BC_CLIENT_SECRET }}
-          BC_ENVIRONMENT_NAME: ${{ secrets.BC_ENVIRONMENT_NAME }}
+          BC_SERVER_INSTANCE: 'BC270'
         run: |
-          Import-Module BcContainerHelper
+          Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
+
           $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
+          Write-Host "Deploying $($appFile.Name) to instance $env:BC_SERVER_INSTANCE"
 
-          $authContext = New-BcAuthContext `
-            -tenantID $env:BC_TENANT_ID `
-            -clientID $env:BC_CLIENT_ID `
-            -clientSecret $env:BC_CLIENT_SECRET `
-            -scopes "https://api.businesscentral.dynamics.com/.default"
+          $appInfo = Get-NAVAppInfo -Path $appFile.FullName
+          Write-Host "App: $($appInfo.Name)  Version: $($appInfo.Version)  Publisher: $($appInfo.Publisher)"
 
-          Publish-PerTenantExtensionApps `
-            -bcAuthContext $authContext `
-            -environment $env:BC_ENVIRONMENT_NAME `
-            -appFiles $appFile.FullName
+          # Check if this app (any version) is already installed, to decide install vs upgrade
+          $existing = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher -ErrorAction SilentlyContinue |
+                      Where-Object { $_.IsInstalled -eq $true }
+
+          Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification
+
+          Sync-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
+
+          if ($existing) {
+            Write-Host "Existing installed version found ($($existing.VersionString)) - running data upgrade"
+            Start-NAVAppDataUpgrade -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
+          } else {
+            Write-Host "No existing installed version found - performing fresh install"
+            Install-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
+          }
+
+      - name: Verify installation
+        shell: powershell
+        env:
+          BC_SERVER_INSTANCE: 'BC270'
+        run: |
+          Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
+          $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
+          $appInfo = Get-NAVAppInfo -Path $appFile.FullName
+
+          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher |
+                       Where-Object { $_.IsInstalled -eq $true }
+
+          if (-not $installed) {
+            throw "Verification failed: app is not showing as installed on $env:BC_SERVER_INSTANCE"
+          }
+
+          Write-Host "Verified: $($installed.Name) v$($installed.VersionString) is installed and active."
