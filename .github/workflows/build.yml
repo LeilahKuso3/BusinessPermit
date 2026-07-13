@@ -163,7 +163,14 @@ jobs:
           $existing = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher -ErrorAction SilentlyContinue |
                       Where-Object { $_.IsInstalled -eq $true }
 
-          Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification
+          # Check if this exact version is already published (but maybe not installed) - e.g. from a retried/partial run
+          $alreadyPublished = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Publisher $appInfo.Publisher -Version $appInfo.Version -ErrorAction SilentlyContinue
+
+          if ($alreadyPublished) {
+            Write-Host "Version $($appInfo.Version) is already published on $env:BC_SERVER_INSTANCE - skipping Publish-NAVApp"
+          } else {
+            Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification
+          }
 
           Sync-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version
 
