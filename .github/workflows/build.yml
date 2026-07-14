@@ -214,7 +214,9 @@ jobs:
           $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
           $appInfo = Get-NAVAppInfo -Path $appFile.FullName
 
-          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Publisher $appInfo.Publisher |
+          # If this still fails, run: Get-Help Get-NAVAppInfo -Full   (locally on the BC server)
+          # to see the exact parameter sets available for this BC version.
+          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Publisher $appInfo.Publisher -TenantSpecificProperties:$true |
                        Where-Object { $_.IsInstalled -eq $true }
 
           if (-not $installed) {
