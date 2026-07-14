@@ -1,7 +1,7 @@
 name: BC CI/CD Pipeline
 
 # ---------------------------------------------------------------------------
-# CI/CD pipeline for an AL (Business Central) project.
+# CI/CD pipeline for an AL project business-permit-app, using GitHub Actions and BcContainerHelper.
 # Build & test run in a fresh BC sandbox Docker container on a Windows runner.
 # On push to main, the compiled app is deployed to an on-prem BC270 server
 # using the self-hosted runner (label: bc-onprem) via NAV Server Admin cmdlets.

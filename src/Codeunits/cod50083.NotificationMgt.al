@@ -55,7 +55,7 @@ codeunit 50083 "Email Notification Management"
 
     procedure RejectApplication(var Permit: Record "Business Permit Application")
     begin
-        Permit.Status := Permit.Status::Approved;
+        Permit.Status := Permit.Status::Rejected;
         Permit.Modify(true);
 
         SendRejectionEmail(Permit);
