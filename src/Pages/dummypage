@@ -81,3 +81,229 @@ area(Navigation)
     end;
 
 }
+name: BC CI/CD Pipeline
+
+# ---------------------------------------------------------------------------
+# CI/CD pipeline for an AL project business-permit-app, using GitHub Actions and BcContainerHelper.
+# Build & test run in a fresh BC sandbox Docker container on a Windows runner.
+# On push to main, the compiled app is deployed to an on-prem BC270 server
+# using the self-hosted runner (label: bc-onprem) via NAV Server Admin cmdlets.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # Path to the folder containing app.json for your AL project, relative to the repo root
+  AL_PROJECT_FOLDER: '.'
+  # GitHub-hosted Windows runners check out the repo to the D: drive, but Windows
+  # containers can only bind-mount folders on C:. We copy the project there before building.
+  BUILD_FOLDER: 'C:\bcbuild'
+  CONTAINER_NAME: 'bccicd'
+  CONTAINER_USER: 'admin'
+  CONTAINER_PASSWORD: 'P@ssw0rdCICD123!'   # only used inside the ephemeral build container
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    outputs:
+      app_version: ${{ steps.appjson.outputs.app_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install BcContainerHelper
+        shell: powershell
+        run: |
+          Install-Module BcContainerHelper -Force -AllowClobber -Scope CurrentUser
+          Import-Module BcContainerHelper
+
+      - name: 'Copy project to C: drive'
+        shell: powershell
+        run: |
+          # Windows containers can only bind-mount folders on C:, but GitHub's
+          # windows-latest runner checks out to D:. Copy the project over first.
+          New-Item -ItemType Directory -Path $env:BUILD_FOLDER -Force | Out-Null
+          Copy-Item -Path (Join-Path $env:AL_PROJECT_FOLDER "*") -Destination $env:BUILD_FOLDER -Recurse -Force
+          Write-Host "Project copied to $env:BUILD_FOLDER"
+          Get-ChildItem $env:BUILD_FOLDER
+
+      - name: Read app.json
+        id: appjson
+        shell: powershell
+        run: |
+          $appJsonPath = Join-Path $env:BUILD_FOLDER "app.json"
+          $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+          "app_name=$($appJson.name)" >> $env:GITHUB_OUTPUT
+          "app_version=$($appJson.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Create BC sandbox container
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $volumeMount = "--volume `"$($env:BUILD_FOLDER):$($env:BUILD_FOLDER)`""
+          New-BcContainer `
+            -accept_eula `
+            -containerName $env:CONTAINER_NAME `
+            -artifactUrl (Get-BcArtifactUrl -type Sandbox -country us -select Latest) `
+            -auth UserPassword `
+            -Credential $credential `
+            -updateHosts `
+            -includeTestToolkit `
+            -additionalParameters @($volumeMount)
+
+      - name: Compile app
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          Compile-AppInBcContainer `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -appProjectFolder $env:BUILD_FOLDER `
+            -appOutputFolder (Join-Path $env:BUILD_FOLDER "output") `
+            -EnableCodeCop `
+            -EnableAppSourceCop:$false
+
+      - name: Publish app to container
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $appFile = Get-ChildItem -Path (Join-Path $env:BUILD_FOLDER "output") -Filter *.app | Select-Object -First 1
+          Publish-BcContainerApp `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -appFile $appFile.FullName `
+            -skipVerification `
+            -install `
+            -sync
+
+      - name: Run automated tests
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          $credential = New-Object PSCredential($env:CONTAINER_USER, (ConvertTo-SecureString $env:CONTAINER_PASSWORD -AsPlainText -Force))
+          $results = Run-TestsInBcContainer `
+            -containerName $env:CONTAINER_NAME `
+            -credential $credential `
+            -detailed `
+            -AzureDevOps 'error' `
+            -returnTrueIfAllPassed
+
+          if (-not $results) {
+            throw "One or more tests failed. Failing the pipeline."
+          }
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: business-permit-app
+          path: ${{ env.BUILD_FOLDER }}\output\*.app
+          if-no-files-found: error
+
+      - name: Remove build container
+        if: always()
+        shell: powershell
+        run: |
+          Import-Module BcContainerHelper
+          Remove-BcContainer -containerName $env:CONTAINER_NAME -ErrorAction SilentlyContinue
+
+  deploy:
+    needs: build-and-test
+    runs-on: [self-hosted, bc-onprem]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: production   # optional: set up manual approval via GitHub Environments
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: business-permit-app
+          path: ./output
+
+      - name: Deploy to on-prem Business Central
+        shell: powershell
+        env:
+          BC_SERVER_INSTANCE: 'BC270'
+          BC_TENANT: 'default'
+        run: |
+          Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
+
+          $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
+          Write-Host "Deploying $($appFile.Name) to instance $env:BC_SERVER_INSTANCE"
+
+          $appInfo = Get-NAVAppInfo -Path $appFile.FullName
+          Write-Host "App: $($appInfo.Name)  Version: $($appInfo.Version)  Publisher: $($appInfo.Publisher)"
+
+          $ErrorActionPreference = "Stop"
+
+          # Publish (safe to attempt - if this exact version is already published, catch and continue)
+          try {
+            Publish-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Path $appFile.FullName -SkipVerification -ErrorAction Stop
+            Write-Host "Published successfully."
+          } catch {
+            if ($_.Exception.Message -match "same App ID and Version") {
+              Write-Host "Already published at this version - continuing."
+            } else {
+              throw
+            }
+          }
+
+          # Sync (safe to attempt - if already synchronized, catch and continue)
+          try {
+            Sync-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+            Write-Host "Synced successfully."
+          } catch {
+            if ($_.Exception.Message -match "already synchronized") {
+              Write-Host "Already synchronized - continuing."
+            } else {
+              throw
+            }
+          }
+
+          # Install (try fresh install first; if BC says a different version is already installed, upgrade instead)
+          try {
+            Install-NAVApp -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+            Write-Host "Installed successfully (fresh install)."
+          } catch {
+            if ($_.Exception.Message -match "already uses a different version") {
+              Write-Host "A different version is already installed - running data upgrade instead."
+              Start-NAVAppDataUpgrade -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Version $appInfo.Version -ErrorAction Stop
+              Write-Host "Upgraded successfully."
+            } elseif ($_.Exception.Message -match "already installed") {
+              Write-Host "This exact version is already installed - nothing to do."
+            } else {
+              throw
+            }
+          }
+
+          Write-Host "Deploy step completed."
+
+      - name: Verify installation
+        shell: powershell
+        env:
+          BC_SERVER_INSTANCE: 'BC270'
+          BC_TENANT: 'default'
+        run: |
+          Import-Module "C:\Program Files\Microsoft Dynamics 365 Business Central\270\Service\NavAdminTool.ps1"
+          $appFile = Get-ChildItem -Path "./output" -Filter *.app | Select-Object -First 1
+          $appInfo = Get-NAVAppInfo -Path $appFile.FullName
+
+          # If this still fails, run: Get-Help Get-NAVAppInfo -Full   (locally on the BC server)
+          # to see the exact parameter sets available for this BC version.
+          $installed = Get-NAVAppInfo -ServerInstance $env:BC_SERVER_INSTANCE -Tenant $env:BC_TENANT -Name $appInfo.Name -Publisher $appInfo.Publisher -TenantSpecificProperties:$true |
+                       Where-Object { $_.IsInstalled -eq $true }
+
+          if (-not $installed) {
+            throw "Verification failed: app is not showing as installed on $env:BC_SERVER_INSTANCE (tenant $env:BC_TENANT)"
+          }
+
+          Write-Host "Verified: $($installed.Name) v$($installed.VersionString) is installed and active for tenant $env:BC_TENANT."

@@ -1,7 +1,7 @@
 name: BC CI/CD Pipeline
 
 # ---------------------------------------------------------------------------
-# CI/CD pipeline for an AL project business-permit-app, using GitHub Actions and BcContainerHelper.
+# CI/CD pipeline for an AL (Business Central) project.
 # Build & test run in a fresh BC sandbox Docker container on a Windows runner.
 # On push to main, the compiled app is deployed to an on-prem BC270 server
 # using the self-hosted runner (label: bc-onprem) via NAV Server Admin cmdlets.
@@ -28,7 +28,7 @@ jobs:
   build-and-test:
     runs-on: windows-latest
     outputs:
-      app_version: ${{ steps.appjson.outputs.app_version }}
+      app_version: ${{ steps.bumpversion.outputs.app_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -57,6 +57,24 @@ jobs:
           $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
           "app_name=$($appJson.name)" >> $env:GITHUB_OUTPUT
           "app_version=$($appJson.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Bump version using run number
+        id: bumpversion
+        shell: powershell
+        run: |
+          $appJsonPath = Join-Path $env:BUILD_FOLDER "app.json"
+          $appJson = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+
+          # Keep Major.Minor.Build from app.json, replace only the Revision segment
+          # with the GitHub run number, e.g. 1.0.0.0 -> 1.0.0.247
+          $parts = $appJson.version -split '\.'
+          $newVersion = "$($parts[0]).$($parts[1]).$($parts[2]).${{ github.run_number }}"
+          $appJson.version = $newVersion
+
+          $appJson | ConvertTo-Json -Depth 10 | Set-Content -Path $appJsonPath -Encoding UTF8
+
+          Write-Host "Version bumped: $newVersion"
+          "app_version=$newVersion" >> $env:GITHUB_OUTPUT
 
       - name: Create BC sandbox container
         shell: powershell
@@ -110,8 +128,9 @@ jobs:
             -containerName $env:CONTAINER_NAME `
             -credential $credential `
             -detailed `
-            -AzureDevOps 'error' `
             -returnTrueIfAllPassed
+
+          Write-Host "All tests passed: $results"
 
           if (-not $results) {
             throw "One or more tests failed. Failing the pipeline."
@@ -223,4 +242,4 @@ jobs:
             throw "Verification failed: app is not showing as installed on $env:BC_SERVER_INSTANCE (tenant $env:BC_TENANT)"
           }
 
-          Write-Host "Verified: $($installed.Name) v$($installed.VersionString) is installed and active for tenant $env:BC_TENANT."
+          Write-Host "Verified: $($installed.Name) v$($installed.Version) is installed and active for tenant $env:BC_TENANT."
