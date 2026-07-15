@@ -130,7 +130,7 @@ jobs:
 
           Write-Host ""
           Write-Host "Test codeunits discovered:"
-          Get-TestsFromBCContainer -containerName $env:CONTAINER_NAME -credential $credential -Detailed | Format-Table -AutoSize
+          Get-TestsFromBCContainer -containerName $env:CONTAINER_NAME -credential $credential | Format-Table -AutoSize
 
       - name: Run automated tests
         shell: powershell
