@@ -1,7 +1,7 @@
 name: BC CI/CD Pipeline
 
 # ---------------------------------------------------------------------------
-# CI/CD pipeline for an AL (Business Central) project.
+# CI/CD pipeline for Business Central AL projects using GitHub Actions.
 # Build & test run in a fresh BC sandbox Docker container on a Windows runner.
 # On push to main, the compiled app is deployed to an on-prem BC270 server
 # using the self-hosted runner (label: bc-onprem) via NAV Server Admin cmdlets.
@@ -15,10 +15,10 @@ on:
   workflow_dispatch:
 
 env:
-  # Path to the folder containing app.json for your AL project, relative to the repo root
+  # Path to the folder containing app.json for the project, relative to the repo root
   AL_PROJECT_FOLDER: '.'
   # GitHub-hosted Windows runners check out the repo to the D: drive, but Windows
-  # containers can only bind-mount folders on C:. We copy the project there before building.
+  # containers can only bind-mount folders on C:.
   BUILD_FOLDER: 'C:\bcbuild'
   CONTAINER_NAME: 'bccicd'
   CONTAINER_USER: 'admin'
